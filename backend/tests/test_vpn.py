@@ -688,3 +688,96 @@ async def test_bypass_removal_is_safe_without_a_captured_route(vpn, monkeypatch)
     calls = record_runs(manager, monkeypatch)
     await manager._remove_inbound_bypass()
     assert calls == []
+
+
+# ------------------------------------------------- automatic exit-IP check
+
+async def test_the_exit_ip_is_checked_automatically_on_connect(vpn, monkeypatch):
+    """Verifying the exit address is the completion of connecting, not a chore."""
+    manager, _, store = vpn
+    manager._bypass = None
+    monkeypatch.setattr(manager, "preflight", lambda kind: None)
+
+    async def fake_wireguard(profile):
+        return None
+
+    monkeypatch.setattr(manager, "_connect_wireguard", fake_wireguard)
+
+    calls: list[int] = []
+
+    async def fake_check(url=None):
+        calls.append(1)
+        manager.exit_ip = "203.0.113.5"
+        return {"exit_ip": manager.exit_ip}
+
+    monkeypatch.setattr(manager, "check_exit_ip", fake_check)
+
+    profile = await manager.save_profile(name="Auto", config=WG_FULL)
+    await manager.connect(profile["id"])
+    # It runs in the background, so connect() does not wait on an external
+    # service; give the task a turn.
+    for _ in range(50):
+        if calls:
+            break
+        await asyncio.sleep(0.02)
+    assert calls == [1], "the exit IP was not checked automatically"
+    assert manager.status()["exit_ip"] == "203.0.113.5"
+
+
+async def test_the_automatic_check_can_be_turned_off(vpn, monkeypatch):
+    manager, _, store = vpn
+    manager._bypass = None
+    monkeypatch.setattr(manager, "preflight", lambda kind: None)
+
+    async def fake_wireguard(profile):
+        return None
+
+    monkeypatch.setattr(manager, "_connect_wireguard", fake_wireguard)
+
+    calls: list[str] = []
+
+    async def fake_check(url=None):
+        calls.append("checked")
+        return {}
+
+    monkeypatch.setattr(manager, "check_exit_ip", fake_check)
+    profile = await manager.save_profile(name="Quiet", config=WG_FULL)
+
+    # Off by setting.
+    store.update({"vpn_auto_check_exit_ip": False})
+    await manager.connect(profile["id"])
+    await asyncio.sleep(0.15)
+    assert calls == [], "checked despite the setting being off"
+    await manager.disconnect()
+
+    # Off by clearing the URL, so nothing is contacted at all.
+    store.update({"vpn_auto_check_exit_ip": True, "vpn_exit_ip_url": ""})
+    await manager.connect(profile["id"])
+    await asyncio.sleep(0.15)
+    assert calls == [], "checked despite there being no URL"
+
+
+async def test_a_failing_automatic_check_leaves_the_tunnel_up(vpn, monkeypatch):
+    """The check is confirmation, not a precondition."""
+    manager, _, _ = vpn
+    manager._bypass = None
+    monkeypatch.setattr(manager, "preflight", lambda kind: None)
+
+    async def fake_wireguard(profile):
+        return None
+
+    monkeypatch.setattr(manager, "_connect_wireguard", fake_wireguard)
+
+    async def boom(url=None):
+        raise VpnError("nothing answered")
+
+    monkeypatch.setattr(manager, "check_exit_ip", boom)
+
+    profile = await manager.save_profile(name="Flaky check", config=WG_FULL)
+    status = await manager.connect(profile["id"])
+    assert status["state"] == "connected"
+    await asyncio.sleep(0.15)
+    assert manager.state == "connected", "a failed check took the tunnel down"
+    assert manager.status()["exit_ip"] is None
+    assert any("automatic exit IP check failed" in line
+               for line in manager.log_tail())

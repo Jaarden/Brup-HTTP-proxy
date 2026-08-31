@@ -115,6 +115,8 @@ export function VpnCard() {
 
   const required = settingsInfo?.system.vpn_required ?? false
   const autoconnect = settingsInfo?.system.vpn_autoconnect ?? ''
+  const autoCheck = settingsInfo?.system.vpn_auto_check_exit_ip ?? true
+  const checkUrl = settingsInfo?.system.vpn_exit_ip_url ?? ''
   const state = status?.state ?? 'disconnected'
   const activeProfile = profiles.find((p) => p.id === status?.active_profile_id)
   // Only a profile that is actually up (or coming up) counts as live. Keying
@@ -174,6 +176,47 @@ export function VpnCard() {
             Intruder refuse to send anything rather than letting it out over your
             normal connection. Leave it on if traffic must never leak.
           </p>
+        </div>
+
+        <div className="setting">
+          <div className="setting-head">
+            <b>Check the exit address automatically</b>
+            <select
+              className="state"
+              value={autoCheck ? 'on' : 'off'}
+              onChange={(e) => void saveSystemSettings({
+                vpn_auto_check_exit_ip: e.target.value === 'on',
+              })}
+            >
+              <option value="on">On</option>
+              <option value="off">Off</option>
+            </select>
+          </div>
+          <p className="hint">
+            Once a tunnel is up, asks{' '}
+            <code>{checkUrl || '(no URL set)'}</code> which address your traffic
+            appears to come from, and shows it in the top bar. It is one request to
+            a third party, which is why it is a setting — clear the URL to disable
+            the check entirely. The tunnel is unaffected either way.
+          </p>
+          <div className="row">
+            <label className="field">
+              Check URL
+              <input
+                type="text"
+                className="w-lg mono"
+                defaultValue={checkUrl}
+                key={checkUrl}
+                placeholder="https://api.ipify.org"
+                onBlur={(e) => {
+                  const next = e.target.value.trim()
+                  if (next !== checkUrl) {
+                    void saveSystemSettings({ vpn_exit_ip_url: next })
+                  }
+                }}
+              />
+            </label>
+          </div>
         </div>
 
         {/* ----------------------------------------------------- profiles */}

@@ -214,6 +214,8 @@ class VpnManager:
         self._kind: Kind | None = None
         self._lock = asyncio.Lock()
         self._bypass: tuple[str, str] | None = None   # (gateway, interface)
+        # Held so the automatic exit-IP check is not garbage collected mid-flight.
+        self._check_task: asyncio.Task | None = None
 
     # ------------------------------------------------------------- accessors
     @property
@@ -371,6 +373,7 @@ class VpnManager:
             self.message = ""
             self._emit("tunnel is up")
             self._publish()
+            self._start_auto_check()
             return self.status()
 
     def _publish(self) -> None:
@@ -620,6 +623,11 @@ class VpnManager:
     # --------------------------------------------------------- disconnecting
     async def _teardown(self) -> None:
         """Undo whatever a connect attempt managed to set up."""
+        if self._check_task is not None and not self._check_task.done():
+            self._check_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._check_task
+        self._check_task = None
         await self._remove_inbound_bypass()
         if self._kind == "wireguard":
             env = {"PATH": f"{SHIM_DIR}:{os.environ.get('PATH', '/usr/sbin:/usr/bin')}"}
@@ -651,6 +659,31 @@ class VpnManager:
                 await self.disconnect()
 
     # ----------------------------------------------------------- exit IP check
+    def _start_auto_check(self) -> None:
+        """Confirm the exit address in the background once the tunnel is up.
+
+        In the background deliberately: it is a request to an external service,
+        and connect() should not sit waiting on it - nor fail if it does not
+        answer. The result reaches the UI through the vpn_state event.
+        """
+        if not self.settings.vpn_auto_check_exit_ip:
+            return
+        if not self.settings.vpn_exit_ip_url.strip():
+            return
+
+        async def run() -> None:
+            try:
+                await self.check_exit_ip()
+            except VpnError as exc:
+                # The tunnel is up either way; this is only the confirmation.
+                self._emit(f"automatic exit IP check failed: {exc}")
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._emit(f"automatic exit IP check failed: {exc}")
+
+        self._check_task = asyncio.create_task(run())
+
     async def check_exit_ip(self, url: str | None = None) -> dict[str, Any]:
         """Ask an external service what IP the traffic appears to come from.
 

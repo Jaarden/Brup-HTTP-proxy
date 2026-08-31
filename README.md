@@ -269,10 +269,23 @@ connection. Turn it on if traffic must never leak.
 
 ### Verifying it works
 
-**Check exit IP** asks an external service (`https://api.ipify.org` by default,
-configurable) which address your traffic appears to come from — the only way to
-confirm from in here that the tunnel is really carrying traffic. It is a manual
-button because it contacts a third party.
+The exit address is checked **automatically** once a tunnel comes up, and shown
+in the top-bar badge — it is the only way to confirm from in here that the tunnel
+is really carrying traffic, so it is part of connecting rather than a separate
+chore. **Check exit IP** re-runs it on demand.
+
+It is one request to an external service (`https://api.ipify.org` by default),
+which is why it is a setting rather than unconditional:
+
+| To stop it | How |
+| --- | --- |
+| Keep the button, drop the automatic check | **Check the exit address automatically** → Off |
+| Never contact anyone | Clear the **Check URL** |
+| Use a different service | Put its URL in **Check URL** — anything returning an IP in its body |
+
+The check runs in the background, so connecting does not wait on it, and a
+failure leaves the tunnel up and says so in the log. It does not go through the
+proxy, so it never appears in your HTTP history.
 
 **Show log** has the full client output, which is where to look when a connection
 fails.
@@ -716,7 +729,8 @@ project cannot override.
 | `vpn_required` *(system only)* | off | Kill switch: refuse to send anything while the tunnel is down. |
 | `vpn_autoconnect` *(system only)* | — | Profile id to connect at start-up. |
 | `vpn_override_dns` *(system only)* | on | Point `/etc/resolv.conf` at the tunnel's DNS. |
-| `vpn_exit_ip_url` *(system only)* | `https://api.ipify.org` | Used by "Check exit IP". |
+| `vpn_exit_ip_url` *(system only)* | `https://api.ipify.org` | Asked for the exit address. Clear it to disable the check entirely. |
+| `vpn_auto_check_exit_ip` *(system only)* | on | Check the exit address as soon as a tunnel connects. |
 | `logging_enabled` / `log_out_of_scope` | on / on | History logging. |
 | `max_history` | 50000 | Older rows are trimmed periodically. |
 | `max_stored_body` | 2 MiB | Stored response cap. The client still gets the full body. |
@@ -757,7 +771,7 @@ docker run --rm \
   -v "$PWD/backend/tests:/app/tests:ro" \
   -v "$PWD/backend/pytest.ini:/app/pytest.ini:ro" \
   brup:latest sh -c "pip install -q pytest pytest-asyncio httpx && python -m pytest -q"
-# 173 passed
+# 176 passed
 ```
 
 Layout:

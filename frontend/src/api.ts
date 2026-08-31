@@ -36,6 +36,7 @@ export interface Settings {
   vpn_autoconnect: string
   vpn_override_dns: boolean
   vpn_exit_ip_url: string
+  vpn_auto_check_exit_ip: boolean
   logging_enabled: boolean
   log_out_of_scope: boolean
   max_history: number

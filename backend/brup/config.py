@@ -119,6 +119,10 @@ class Settings(BaseModel):
     vpn_autoconnect: str = ""           # profile id to bring up at startup
     vpn_override_dns: bool = True
     vpn_exit_ip_url: str = "https://api.ipify.org"
+    # Check the exit address as soon as a tunnel comes up. This is an outbound
+    # request to whatever vpn_exit_ip_url names, so it is a setting rather than
+    # unconditional; clearing the URL disables the check entirely.
+    vpn_auto_check_exit_ip: bool = True
 
     # --- history ---------------------------------------------------------
     logging_enabled: bool = True
@@ -141,6 +145,7 @@ SYSTEM_ONLY_KEYS: frozenset[str] = frozenset({
     "vpn_autoconnect",
     "vpn_override_dns",
     "vpn_exit_ip_url",
+    "vpn_auto_check_exit_ip",
 })
 
 PROJECT_OVERRIDABLE_KEYS: frozenset[str] = (
