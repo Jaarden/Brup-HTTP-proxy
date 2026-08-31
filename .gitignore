@@ -17,6 +17,10 @@ __pycache__/
 *.sqlite3-shm
 settings.json
 
+# Local compose overrides. .env.example is committed; .env is not.
+.env
+data/
+
 # Editors / OS
 .DS_Store
 *.swp

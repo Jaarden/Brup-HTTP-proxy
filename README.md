@@ -16,6 +16,7 @@ web browser. Everything runs in Docker.
 
 - [What it does](#what-it-does)
 - [Quick start](#quick-start)
+- [Where the data lives](#where-the-data-lives)
 - [Projects](#projects)
 - [Settings: system and project](#settings-system-and-project)
 - [Routing through a VPN](#routing-through-a-vpn)
@@ -73,9 +74,9 @@ commonly already taken by other local services. Host and container ports are kep
 identical, so the address the settings page reports is the one you connect to. To
 change them, edit both `docker-compose.yml` and the listener port in settings.
 
-State lives in the `brup-data` volume (`/data` in the container): the CA key and
-certificate, `settings.json`, and the `brup.sqlite3` history database. Restarting
-or rebuilding the container keeps all of it, so you install the CA once.
+State lives in a Docker volume by default and survives restarts and rebuilds, so
+you install the CA once. See [Where the data lives](#where-the-data-lives) to put
+it in a directory of your choosing instead.
 
 To start over completely:
 
@@ -86,6 +87,53 @@ docker compose down -v      # -v also deletes the volume, including the CA
 A database written before projects existed cannot be upgraded in place — BRUP
 refuses to start against one and tells you to run the command above rather than
 risk mangling it.
+
+## Where the data lives
+
+Everything BRUP keeps is in one directory: the CA key and certificate,
+`settings.json`, and `brup.sqlite3` holding every project's history, sitemap,
+Repeater tabs and Intruder results.
+
+Set **`BRUP_DATA`** to choose where that is. Copy `.env.example` to `.env` and
+uncomment the line you want — `docker compose` reads `.env` automatically:
+
+| `BRUP_DATA` | Result |
+| --- | --- |
+| unset, or `brup-data` | A named Docker volume (the default). Docker manages the location. |
+| `./data` | A directory beside `docker-compose.yml`. |
+| `/srv/brup/data` | Any absolute path on the host. |
+
+Anything starting with `/` or `.` becomes a bind mount; anything else is treated
+as a named volume. A one-off run without touching `.env` works too:
+
+```bash
+BRUP_DATA=/srv/brup/data docker compose up -d
+```
+
+A host directory is easier to back up, inspect and move between machines. The
+trade-off is ownership: the container runs as root, so the files are root-owned
+and you will need `sudo` to read or delete them from the host.
+
+`BRUP_DATA_DIR` sets where that data is mounted *inside* the container
+(default `/data`). It is rarely worth changing; the application reads the same
+variable, so the mount and the code cannot disagree.
+
+### Moving existing data to a directory
+
+Stop the container first, so SQLite checkpoints its write-ahead log into the main
+database file:
+
+```bash
+docker compose down
+docker run --rm -v brup_brup-data:/from -v /srv/brup/data:/to alpine \
+    sh -c 'cp -a /from/. /to/'
+echo 'BRUP_DATA=/srv/brup/data' >> .env
+docker compose up -d
+```
+
+The volume is named after the Compose project, which comes from the directory
+name — `brup_brup-data` here. `docker volume ls` will confirm it. The CA,
+projects and VPN profiles all come across, so nothing needs reinstalling.
 
 ## Projects
 
@@ -550,8 +598,11 @@ Environment variables:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `BRUP_DATA_DIR` | `/data` | Where the CA, settings and database live. |
-| `BRUP_LOG_LEVEL` | `INFO` | Python log level. |
+| `BRUP_DATA` | `brup-data` | Host location of the data: a named volume, or a path to bind-mount. Read by `docker compose`, not the application. |
+| `BRUP_DATA_DIR` | `/data` | Where that data is mounted inside the container, and where the application looks for it. |
+| `BRUP_LOG_LEVEL` | `INFO` | Python log level. `DEBUG` adds VPN client output. |
+
+Set these in `.env` (start from `.env.example`).
 
 ## Development
 

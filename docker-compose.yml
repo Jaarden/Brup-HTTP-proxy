@@ -9,7 +9,17 @@ services:
       - "9081:9081"   # proxy listener (point your browser here)
       - "9444:9444"   # invisible-HTTPS listener (optional)
     volumes:
-      - brup-data:/data
+      # Where BRUP keeps its state: the CA key and certificate, settings.json
+      # and the SQLite database holding every project.
+      #
+      # BRUP_DATA takes either form:
+      #   brup-data              a named Docker volume (the default)
+      #   ./data                 a directory beside this file
+      #   /srv/brup/data         an absolute path on the host
+      #
+      # Anything starting with / or . is a bind mount; anything else is treated
+      # as a named volume. Set it in .env - see .env.example.
+      - ${BRUP_DATA:-brup-data}:${BRUP_DATA_DIR:-/data}
     # Needed only for the VPN feature: bringing up a tunnel means creating a
     # network interface and routes inside the container.
     cap_add:
@@ -19,11 +29,15 @@ services:
     sysctls:
       net.ipv4.conf.all.src_valid_mark: "1"
     environment:
-      BRUP_LOG_LEVEL: INFO
+      # Kept in step with the mount target above, so the two cannot disagree.
+      BRUP_DATA_DIR: ${BRUP_DATA_DIR:-/data}
+      BRUP_LOG_LEVEL: ${BRUP_LOG_LEVEL:-INFO}
     # The proxy needs to resolve and reach whatever you are testing. If your
     # target runs on the Docker host, use host.docker.internal:
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
 volumes:
+  # Only used when BRUP_DATA is left at its default. Declaring it is harmless
+  # when BRUP_DATA points at a host directory instead.
   brup-data:
