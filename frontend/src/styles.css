@@ -317,6 +317,20 @@ table.grid td.mono { font-family: var(--mono); }
 .treerow:hover { background: var(--bg-2); }
 .treerow.active { background: #2a3a4d; }
 
+/* Host rows are the section headings of this tree: heavier, on their own
+   ground, with a rule separating one site from the next. */
+.tree > .treerow.host {
+  padding-top: 5px; padding-bottom: 5px; margin-top: 4px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-2); font-weight: 600;
+}
+.tree > .treerow.host:first-child { margin-top: 0; border-top: none; }
+.tree > .treerow.host:hover { background: var(--bg-3); }
+.tree > .treerow.host.active { background: #2a3a4d; }
+/* Out-of-scope sites recede rather than disappear. */
+.treerow.host.out .tname { color: var(--text-faint); font-weight: 400; }
+.treerow.out:not(.host) .tname { color: var(--text-faint); }
+
 .treerow .caret {
   flex: 0 0 12px; text-align: center; color: var(--text-faint); font-size: 10px;
 }

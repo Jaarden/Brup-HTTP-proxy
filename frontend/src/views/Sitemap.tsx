@@ -24,24 +24,80 @@ function headlineStatus(statuses: number[]): number | null {
   return statuses[0]
 }
 
-function TreeRow({
-  node, depth, expanded, onToggle, selectedKey, onSelect,
-}: {
+
+/**
+ * What a tree row actually shows. Kept separate from SiteNode because a row can
+ * stand for a run of nodes: a directory that was never requested itself and has
+ * exactly one child is a row carrying no information, so the run is joined into
+ * one label and the row takes the identity of the deepest node.
+ */
+interface ViewNode {
   node: SiteNode
+  label: string
+  children: ViewNode[]
+}
+
+function compress(node: SiteNode, enabled: boolean): ViewNode {
+  let current = node
+  let label = node.name
+  if (enabled) {
+    while (
+      current.kind === 'path'
+      && current.count === 0
+      && current.children.length === 1
+    ) {
+      current = current.children[0]
+      label += `/${current.name}`
+    }
+  }
+  return {
+    node: current,
+    label,
+    children: current.children.map((child) => compress(child, enabled)),
+  }
+}
+
+/** Keep matches, their ancestors, and the whole subtree under a match. */
+function filterTree(node: SiteNode, needle: string): SiteNode | null {
+  const hit = node.name.toLowerCase().includes(needle)
+    || node.path.toLowerCase().includes(needle)
+  if (hit) return node
+  const children = node.children
+    .map((child) => filterTree(child, needle))
+    .filter((child): child is SiteNode => child !== null)
+  return children.length ? { ...node, children } : null
+}
+
+function collectKeys(nodes: ViewNode[], into: string[] = []): string[] {
+  for (const entry of nodes) {
+    if (entry.children.length) into.push(entry.node.key)
+    collectKeys(entry.children, into)
+  }
+  return into
+}
+
+function TreeRow({
+  entry, depth, expanded, onToggle, selectedKey, onSelect,
+}: {
+  entry: ViewNode
   depth: number
   expanded: Set<string>
   onToggle: (key: string) => void
   selectedKey: string | null
   onSelect: (node: SiteNode) => void
 }) {
-  const hasChildren = node.children.length > 0
+  const node = entry.node
+  const hasChildren = entry.children.length > 0
   const isOpen = expanded.has(node.key)
   const status = headlineStatus(node.statuses)
+  const isHost = node.kind === 'host'
 
   return (
     <>
       <div
-        className={`treerow${node.key === selectedKey ? ' active' : ''}`}
+        className={`treerow${isHost ? ' host' : ''}`
+          + `${node.key === selectedKey ? ' active' : ''}`
+          + `${node.in_scope ? '' : ' out'}`}
         style={{ paddingLeft: 6 + depth * 14 }}
         onClick={() => onSelect(node)}
       >
@@ -54,11 +110,8 @@ function TreeRow({
         >
           {hasChildren ? (isOpen ? '▾' : '▸') : '·'}
         </span>
-        <span
-          className={`tname${node.in_scope ? '' : ' dim'}`}
-          title={node.url}
-        >
-          {node.name}
+        <span className="tname" title={node.url}>
+          {entry.label}
         </span>
         {node.methods.length > 0 && (
           <span className="tmethods">{node.methods.join(' ')}</span>
@@ -66,10 +119,10 @@ function TreeRow({
         {status != null && <span className={`tstatus ${statusClass(status)}`}>{status}</span>}
         <span className="badge quiet">{node.subtree_count}</span>
       </div>
-      {isOpen && node.children.map((child) => (
+      {isOpen && entry.children.map((child) => (
         <TreeRow
-          key={child.key}
-          node={child}
+          key={child.node.key}
+          entry={child}
           depth={depth + 1}
           expanded={expanded}
           onToggle={onToggle}
@@ -92,6 +145,8 @@ export function Sitemap() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [selected, setSelected] = useState<SiteNode | null>(null)
   const [inScopeOnly, setInScopeOnly] = useState(false)
+  const [treeFilter, setTreeFilter] = useState('')
+  const [compact, setCompact] = useState(true)
   const [recursive, setRecursive] = useState(true)
   const [loading, setLoading] = useState(false)
 
@@ -99,17 +154,14 @@ export function Sitemap() {
   const [itemTotal, setItemTotal] = useState(0)
   const [detail, setDetail] = useState<FlowDetail | null>(null)
 
-  const load = useCallback(async (opts?: { keepSelection?: boolean }) => {
+  const load = useCallback(async () => {
     setLoading(true)
     try {
       const map = await api.sitemap(inScopeOnly)
       setHosts(map.hosts)
       setTruncated(map.truncated)
-      setExpanded((prev) => {
-        if (prev.size > 0 || opts?.keepSelection) return prev
-        // First load: open the hosts so the tree is not a wall of carets.
-        return new Set(map.hosts.map((host) => host.key))
-      })
+      // Deliberately not expanded: 40-odd hosts with their children open is a
+      // wall of rows. Collapsed, the tree opens as a list of sites you touched.
     } catch (error) {
       showToast(`Could not load sitemap: ${String(error)}`, 'error')
     } finally {
@@ -139,7 +191,7 @@ export function Sitemap() {
     }
     if (type !== 'flow_new') return
     if (pending.current) window.clearTimeout(pending.current)
-    pending.current = window.setTimeout(() => void load({ keepSelection: true }), 1500)
+    pending.current = window.setTimeout(() => void load(), 1500)
   })
   useEffect(() => () => {
     if (pending.current) window.clearTimeout(pending.current)
@@ -211,17 +263,25 @@ export function Sitemap() {
     })
   }
 
-  const allKeys = useMemo(() => {
-    const keys: string[] = []
-    const walk = (nodes: SiteNode[]) => {
-      for (const node of nodes) {
-        if (node.children.length) keys.push(node.key)
-        walk(node.children)
-      }
-    }
-    walk(hosts)
-    return keys
-  }, [hosts])
+  const needle = treeFilter.trim().toLowerCase()
+
+  const view = useMemo(() => {
+    const source = needle
+      ? hosts
+          .map((host) => filterTree(host, needle))
+          .filter((host): host is SiteNode => host !== null)
+      : hosts
+    return source.map((host) => compress(host, compact))
+  }, [hosts, needle, compact])
+
+  const allKeys = useMemo(() => collectKeys(view), [view])
+
+  // While filtering, open everything that survived so matches are visible
+  // without hunting for carets.
+  const effectiveExpanded = useMemo(
+    () => (needle ? new Set(allKeys) : expanded),
+    [needle, allKeys, expanded],
+  )
 
   const openItem = async (id: number) => {
     try {
@@ -243,7 +303,7 @@ export function Sitemap() {
       showToast(result.added
         ? `Added to ${kind} scope: ${result.pattern}`
         : `Already in ${kind} scope`)
-      void load({ keepSelection: true })
+      void load()
     } catch (error) {
       showToast(error instanceof ApiError ? error.message : String(error), 'error')
     }
@@ -262,11 +322,18 @@ export function Sitemap() {
   return (
     <div className="pane">
       <div className="toolbar tight">
-        <button className="sm" onClick={() => void load({ keepSelection: true })}>
+        <button className="sm" onClick={() => void load()}>
           {loading ? 'Loading…' : 'Refresh'}
         </button>
         <button className="sm" onClick={() => setExpanded(new Set(allKeys))}>Expand all</button>
         <button className="sm" onClick={() => setExpanded(new Set())}>Collapse all</button>
+        <input
+          type="search"
+          className="w-md"
+          placeholder="Find a host or path…"
+          value={treeFilter}
+          onChange={(event) => setTreeFilter(event.target.value)}
+        />
         <label className="toggle">
           <input
             type="checkbox"
@@ -274,6 +341,17 @@ export function Sitemap() {
             onChange={(event) => setInScopeOnly(event.target.checked)}
           />
           In scope only
+        </label>
+        <label
+          className="toggle"
+          title="Join directories that were never requested and have a single child"
+        >
+          <input
+            type="checkbox"
+            checked={compact}
+            onChange={(event) => setCompact(event.target.checked)}
+          />
+          Compact paths
         </label>
 
         <span className="spacer" />
@@ -294,14 +372,22 @@ export function Sitemap() {
           </>
         )}
         <span className="dim">
-          {hosts.length} host{hosts.length === 1 ? '' : 's'} · {totalItems.toLocaleString()} items
+          {needle && view.length !== hosts.length
+            ? `${view.length} of ${hosts.length} hosts`
+            : `${hosts.length} host${hosts.length === 1 ? '' : 's'}`}
+          {' · '}{totalItems.toLocaleString()} items
           {truncated && <span style={{ color: 'var(--yellow)' }}> · truncated</span>}
         </span>
       </div>
 
       <Split initial={0.28} storageKey="sitemap">
         <div className="tree">
-          {hosts.length === 0 ? (
+          {hosts.length > 0 && view.length === 0 ? (
+            <div className="empty">
+              <h4>Nothing matches “{treeFilter}”</h4>
+              <p>Clear the filter to see the whole tree again.</p>
+            </div>
+          ) : hosts.length === 0 ? (
             <div className="empty">
               <h4>Nothing mapped yet</h4>
               <p>
@@ -311,12 +397,12 @@ export function Sitemap() {
               </p>
             </div>
           ) : (
-            hosts.map((host) => (
+            view.map((host) => (
               <TreeRow
-                key={host.key}
-                node={host}
+                key={host.node.key}
+                entry={host}
                 depth={0}
-                expanded={expanded}
+                expanded={effectiveExpanded}
                 onToggle={toggle}
                 selectedKey={selected?.key ?? null}
                 onSelect={select}

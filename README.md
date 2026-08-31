@@ -550,6 +550,24 @@ the whole subtree. `http://` and `https://` are separate trees, labelled with
 their scheme and sorted next to each other. Out-of-scope hosts are dimmed and
 sort last.
 
+### Finding your way around it
+
+The tree opens **collapsed**, as a list of the sites you have touched with an
+item count each — an overview rather than a wall of rows. Host rows are the
+section headings: heavier, on their own ground, separated by a rule.
+
+- **Find a host or path…** prunes the tree to what matches and opens it, so you
+  do not scan forty hosts looking for one.
+- **Compact paths** (on by default) joins a run of directories that were never
+  requested themselves and have a single child into one row, so
+  `o/oauth2/postmessageRelay` is one line rather than three. Those rows carry no
+  information — nothing was ever requested at them — and on real browsing
+  traffic they are the bulk of the tree. Turn it off to see the literal
+  structure.
+- **Expand all** / **Collapse all** for when you do want the whole shape.
+- **In scope only** is the sharpest filter once you have set a scope; without
+  one, browser telemetry and CDN chatter dominate.
+
 Selecting a node lists its logged items on the right:
 
 - **include sub-paths** toggles between just that path (with its query-string
