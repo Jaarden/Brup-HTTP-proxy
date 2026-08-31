@@ -1,0 +1,24 @@
+# Node
+frontend/node_modules/
+frontend/dist/
+npm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+
+# Runtime state. The CA private key, VPN profiles and history live here and
+# must never be committed; in Docker this is a named volume, not this path.
+/data/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+settings.json
+
+# Editors / OS
+.DS_Store
+*.swp
+.idea/
+.vscode/

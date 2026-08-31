@@ -1,0 +1,27 @@
+#!/bin/sh
+# A `sysctl` stand-in for wg-quick running inside a container.
+#
+# Docker mounts /proc/sys read-only, so `sysctl -w` fails even when the value is
+# already exactly what is being asked for - and docker-compose sets
+# net.ipv4.conf.all.src_valid_mark=1 at container start precisely so it is.
+# wg-quick treats that failure as fatal and tears the tunnel down again.
+#
+# So: if every requested assignment already holds, report success. Otherwise
+# hand over to the real sysctl, so a genuine misconfiguration still surfaces
+# with its real error message.
+REAL=/usr/sbin/sysctl
+
+for arg in "$@"; do
+    case "$arg" in
+        *=*)
+            key=${arg%%=*}
+            want=${arg#*=}
+            path=/proc/sys/$(printf '%s' "$key" | tr . /)
+            if [ -r "$path" ] && [ "$(cat "$path" 2>/dev/null)" = "$want" ]; then
+                continue
+            fi
+            exec "$REAL" "$@"
+            ;;
+    esac
+done
+exit 0

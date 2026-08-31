@@ -1,0 +1,29 @@
+services:
+  brup:
+    build: .
+    image: brup:latest
+    container_name: brup
+    restart: unless-stopped
+    ports:
+      - "9080:9080"   # web UI + API
+      - "9081:9081"   # proxy listener (point your browser here)
+      - "9444:9444"   # invisible-HTTPS listener (optional)
+    volumes:
+      - brup-data:/data
+    # Needed only for the VPN feature: bringing up a tunnel means creating a
+    # network interface and routes inside the container.
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    sysctls:
+      net.ipv4.conf.all.src_valid_mark: "1"
+    environment:
+      BRUP_LOG_LEVEL: INFO
+    # The proxy needs to resolve and reach whatever you are testing. If your
+    # target runs on the Docker host, use host.docker.internal:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+volumes:
+  brup-data:
