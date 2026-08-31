@@ -19,11 +19,12 @@ from typing import Iterator, Literal
 
 from pydantic import BaseModel, Field
 
+from . import http2
 from .config import Settings
 from .db import Database
 from .events import EventHub
 from .projects import ProjectManager
-from .proxy.upstream import UpstreamResult, send_request
+from .proxy.upstream import UpstreamResult, send_h2_request, send_request
 from .vpn import VpnManager
 
 log = logging.getLogger("brup.intruder")
@@ -514,6 +515,16 @@ class AttackManager:
         blocked = self.vpn.killswitch_error(self.settings) if self.vpn else None
         if blocked:
             result = UpstreamResult(error=blocked)
+        elif http2.looks_like_h2_text(raw):
+            # The template is written in the HTTP/2 form, so send it as HTTP/2.
+            try:
+                headers, body = http2.request_from_text(raw)
+            except http2.Http2Error as exc:
+                result = UpstreamResult(error=f"unusable HTTP/2 request: {exc}")
+            else:
+                result = await send_h2_request(
+                    config.host, config.port, headers, body, self.settings
+                )
         else:
             result = await send_request(
                 config.host, config.port, config.tls, raw, self.settings
@@ -522,7 +533,16 @@ class AttackManager:
         status = reason = None
         resp_len = words = None
         grep_hits: list[str] = []
-        if result.response is not None:
+        if result.h2_headers is not None:
+            status = result.status
+            reason = ""
+            raw_response = http2.response_to_text(result.h2_headers, result.h2_body)
+            resp_len = len(raw_response)
+            words = len(result.h2_body.split())
+            for needle in config.grep_match:
+                if needle and needle.encode("utf-8", "surrogateescape") in raw_response:
+                    grep_hits.append(needle)
+        elif result.response is not None:
             status = result.response.status
             reason = result.response.reason.decode("latin-1", "replace")
             resp_len = len(result.raw_response)
@@ -547,10 +567,13 @@ class AttackManager:
             "error": result.error,
             "grep_hits": ",".join(grep_hits),
         }
+        stored_response = result.raw_response or None
+        if result.h2_headers is not None:
+            stored_response = http2.response_to_text(result.h2_headers, result.h2_body)
         await self.db.insert_result(
             **row,
             raw_request=raw,
-            raw_response=result.raw_response or None,
+            raw_response=stored_response,
         )
         if attack.completed % PERSIST_EVERY == 0:
             await self._persist(attack)

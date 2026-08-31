@@ -515,6 +515,45 @@ export function SettingsForm({ mode }: { mode: Mode }) {
           </div>
 
           <div className="card">
+            <h3>HTTP/2</h3>
+            <div className="card-body">
+              {mode === 'system' && (
+                <div className="setting">
+                  <div className="setting-head">
+                    <b>Advertise HTTP/2 to clients</b>
+                    <select
+                      className="state"
+                      value={valueOf('listen_http2') ? 'on' : 'off'}
+                      onChange={(event) =>
+                        setValue('listen_http2', event.target.value === 'on')}
+                    >
+                      <option value="on">On</option>
+                      <option value="off">Off</option>
+                    </select>
+                    <span className="tag">system only</span>
+                  </div>
+                  <p className="hint">
+                    Offers <code>h2</code> alongside <code>http/1.1</code> in the TLS
+                    handshake, and the browser chooses. A listener property, so it is
+                    shared by every project. Turn it off to force every client onto
+                    HTTP/1.1.
+                  </p>
+                </div>
+              )}
+              <BoolRow
+                k="upstream_http2"
+                label="Offer HTTP/2 to origin servers"
+                hint={<>
+                  When a server declines, BRUP speaks HTTP/1.1 to it and translates,
+                  so an HTTP/2 client still gets a coherent HTTP/2 response. Turn this
+                  off to force a target onto HTTP/1.1 and compare how it behaves —
+                  differences between the two paths are worth looking at.
+                </>}
+              />
+            </div>
+          </div>
+
+          <div className="card">
             <h3>Header rules</h3>
             <div className="card-body">
               <Row

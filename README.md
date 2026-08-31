@@ -23,6 +23,7 @@ web browser. Everything runs in Docker.
 - [Point a browser at it](#point-a-browser-at-it)
 - [Install the CA certificate](#install-the-ca-certificate)
 - [Proxy and interception](#proxy-and-interception)
+- [HTTP/2](#http2)
 - [Header rules](#header-rules)
 - [Sitemap](#sitemap)
 - [Invisible proxying](#invisible-proxying)
@@ -39,6 +40,7 @@ web browser. Everything runs in Docker.
 | Feature | Notes |
 | --- | --- |
 | **Projects** | Isolated workspaces in the left sidebar. Each owns its history, sitemap, Repeater tabs and Intruder attacks, and can override the system settings. |
+| **HTTP/2** | h2 to the browser and to the origin, with transparent downgrade when the origin only speaks HTTP/1.1. Intercept, edit, Repeater and Intruder all work over h2. |
 | **Intercepting proxy** | Holds requests (and optionally responses), lets you edit the raw bytes, then forward or drop. |
 | **HTTP history** | Every exchange logged to SQLite with search, host/method/source filters, scope filter, notes and colour highlights. |
 | **VPN** | Import an OpenVPN `.ovpn` or WireGuard `.conf` file and route all proxy traffic through it, with a kill switch that refuses to send anything when the tunnel is down. |
@@ -415,6 +417,74 @@ Repeater or Intruder.
 set, only matching URLs are in scope. Out-of-scope traffic is still proxied so
 the site keeps working — it is just never held for interception.
 
+## HTTP/2
+
+BRUP advertises `h2` alongside `http/1.1` in the TLS handshake and the browser
+chooses. When a client picks HTTP/2, BRUP speaks HTTP/2 to the origin too — and
+when the origin declines, it speaks HTTP/1.1 to the origin and translates, so
+the client still gets a coherent HTTP/2 response. History records which protocol
+was actually used, tagged `h2` beside the host.
+
+### Reading and editing an HTTP/2 message
+
+An HTTP/2 request is a set of header fields, not a request line, so there is no
+one canonical text form. Messages are shown like this:
+
+```
+GET /search?q=1 HTTP/2
+:authority: example.com
+:scheme: https
+accept: */*
+cookie: a=1
+```
+
+The first line puts `:method` and `:path` where you expect them; the remaining
+pseudo-headers are shown rather than hidden. Editing round-trips exactly, so what
+you type is what goes on the wire.
+
+- An explicit `:method` or `:path` header line **overrides the first line**, for
+  sending something the first line cannot express.
+- Pseudo-headers are reordered to the front on the way out, because HTTP/2
+  rejects a pseudo-header that follows a regular one.
+- Field names must be lowercase — that is HTTP/2, not a BRUP restriction.
+- Repeated fields are kept separate, not merged. Browsers legitimately split
+  `cookie` across several fields to help HPACK.
+- Responses show a reason phrase for readability. HTTP/2 has none, so it is
+  synthesised from the status code and ignored when parsed back.
+
+### Repeater and Intruder
+
+Both follow the request's first line. End it with `HTTP/2` and the request goes
+out as HTTP/2; leave it `HTTP/1.1` and it does not. That makes comparing a
+target's behaviour across the two protocols a one-word edit — often worth doing,
+since request handling frequently differs between an HTTP/2 front end and the
+HTTP/1.1 hop behind it.
+
+HTTP/2 requires TLS here, so Repeater refuses an `HTTP/2` request with HTTPS
+unticked rather than sending something that cannot work.
+
+### Turning it off
+
+| Setting | Tier | Effect |
+| --- | --- | --- |
+| **Advertise HTTP/2 to clients** | system | Stop offering `h2` in ALPN, forcing every client onto HTTP/1.1. |
+| **Offer HTTP/2 to origin servers** | project | Stop offering `h2` upstream, forcing the origin onto HTTP/1.1 while the client may still use h2. |
+
+The second is the interesting one: it lets you hold the client side constant and
+change only what the origin sees.
+
+### Limits
+
+- **No h2c** (HTTP/2 without TLS). Browsers do not use it.
+- **Server push is refused.** BRUP advertises `ENABLE_PUSH=0` and resets anything
+  pushed anyway, rather than forwarding streams the client did not ask for.
+- **Stream priority is not preserved.** It has no bearing on what a request does.
+- **One upstream connection per request**, as on the HTTP/1.1 path. Client-side
+  multiplexing is fully supported — a browser's concurrent streams are handled
+  concurrently, and interception holding one does not block the others.
+- **Trailers** arrive appended to the response header fields rather than being
+  kept separate.
+
 ## Header rules
 
 **Proxy → Project settings → Header rules** rewrites headers on traffic going
@@ -619,6 +689,8 @@ project cannot override.
 | `intercept_skip_extensions` | css, js, images, fonts… | Never held, even in scope. |
 | `scope_include` / `scope_exclude` | empty | Regexes against the full URL. |
 | `header_rules` | empty | Header rewrites applied to proxied traffic. |
+| `listen_http2` *(system only)* | on | Advertise `h2` to clients in ALPN. |
+| `upstream_http2` | on | Offer `h2` to origin servers. |
 | `upstream_proxy` | — | Chain to another proxy, e.g. `http://corp-proxy:3128`. |
 | `upstream_verify_tls` | off | Off lets you test hosts with bad certificates. |
 | `connect_timeout` / `read_timeout` | 10s / 30s | Upstream timeouts. |
@@ -667,7 +739,7 @@ docker run --rm \
   -v "$PWD/backend/tests:/app/tests:ro" \
   -v "$PWD/backend/pytest.ini:/app/pytest.ini:ro" \
   brup:latest sh -c "pip install -q pytest pytest-asyncio httpx && python -m pytest -q"
-# 122 passed
+# 173 passed
 ```
 
 Layout:
@@ -683,6 +755,9 @@ backend/brup/
   ca.py               CA + on-demand leaf certificates
   projects.py         projects, active project, effective settings
   vpn.py              VPN profiles, tunnel lifecycle, kill switch
+  http2.py            HTTP/2 message form, and translation to HTTP/1.1
+  proxy/h2_server.py  serving h2 to a client, one task per stream
+  proxy/h2_client.py  sending one h2 request upstream
   intruder.py         positions, payload sets, attack engine
   sitemap.py          host/path tree built from history rows
   db.py               SQLite storage
@@ -705,8 +780,7 @@ request behaves the same wherever you send it from.
 
 Known limits:
 
-- **HTTP/1.1 only.** No HTTP/2 or WebSocket interception. ALPN advertises only
-  `http/1.1`, so browsers negotiate down to it.
+- **No WebSocket interception.** A WebSocket upgrade is proxied but not decoded.
 - **Chunked bodies are de-chunked** and re-framed with `Content-Length`. Good for
   editing, but it means request-smuggling tests that depend on exact chunked
   framing are out of scope.

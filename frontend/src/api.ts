@@ -16,6 +16,7 @@ export interface Settings {
   invisible_proxy: boolean
   invisible_tls_enabled: boolean
   invisible_tls_port: number
+  listen_http2: boolean
   invisible_default_host: string
   intercept_enabled: boolean
   intercept_requests: boolean
@@ -24,6 +25,7 @@ export interface Settings {
   scope_include: ScopeRule[]
   scope_exclude: ScopeRule[]
   header_rules: HeaderRule[]
+  upstream_http2: boolean
   upstream_proxy: string
   upstream_verify_tls: boolean
   connect_timeout: number
@@ -113,6 +115,8 @@ export interface FlowRow {
   host: string
   port: number
   tls: number | boolean
+  /** What was spoken to the origin: "http/1.1" or "h2". */
+  protocol?: string
   method: string | null
   target?: string | null
   url: string | null
@@ -155,6 +159,7 @@ export interface PendingItem {
 export interface RepeaterResult {
   ok: boolean
   error: string | null
+  protocol?: string
   duration_ms: number
   status: number | null
   reason: string | null

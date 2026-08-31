@@ -12,12 +12,13 @@ from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconn
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from .. import http2
 from .. import http_message as hm
 from ..config import in_scope, validate_header_rules
 from ..intruder import MARKER, AttackConfig, ParseError, fix_content_length
 from ..netutil import decode_content
 from ..projects import ProjectError
-from ..proxy.upstream import send_request
+from ..proxy.upstream import send_h2_request, send_request
 from ..sitemap import build_sitemap
 from ..vpn import VpnError, describe_config, detect_kind
 
@@ -482,7 +483,16 @@ async def repeater_send(body: RepeaterRequest):
     raw = _unb64(body.raw_b64)
     if not raw.strip():
         raise HTTPException(400, "empty request")
-    if body.update_content_length:
+
+    # The editor buffer tells us which protocol to speak: an HTTP/2 request has
+    # no HTTP/1.1 request line to send, so the two forms are not interchangeable.
+    as_h2 = http2.looks_like_h2_text(raw)
+    if as_h2 and not body.tls:
+        raise HTTPException(
+            400, "HTTP/2 needs TLS here - tick HTTPS, or change the first line "
+                 "to HTTP/1.1 to send it as HTTP/1.1.",
+        )
+    if body.update_content_length and not as_h2:
         raw = fix_content_length(raw)
 
     blocked = st.vpn.killswitch_error(settings)
@@ -490,7 +500,27 @@ async def repeater_send(body: RepeaterRequest):
         return {
             "ok": False, "error": blocked, "duration_ms": 0.0, "status": None,
             "reason": None, "length": 0, "raw_response_b64": None, "flow_id": None,
+            "protocol": "h2" if as_h2 else "http/1.1",
         }
+
+    if as_h2:
+        try:
+            h2_headers, h2_body = http2.request_from_text(raw)
+        except http2.Http2Error as exc:
+            raise HTTPException(400, str(exc)) from exc
+        result = await send_h2_request(body.host, body.port, h2_headers, h2_body,
+                                       settings)
+        path = http2.get(h2_headers, b":path") or b"/"
+        method = (http2.get(h2_headers, b":method") or b"GET").decode("latin-1", "replace")
+        target = path.decode("latin-1", "replace")
+        url = hm.build_url(True, body.host, body.port, path)
+        raw_response = (http2.response_to_text(result.h2_headers, result.h2_body)
+                        if result.h2_headers is not None else b"")
+        return await _finish_repeater(
+            st, settings, body, raw, result, url, method, target,
+            raw_response=raw_response, protocol=result.protocol,
+            status=result.status, reason="",
+        )
 
     result = await send_request(body.host, body.port, body.tls, raw, settings)
 
@@ -502,30 +532,50 @@ async def repeater_send(body: RepeaterRequest):
     except hm.ParseError:
         url, method, target = f"//{body.host}:{body.port}", "?", "?"
 
+    resp = result.response
+    return await _finish_repeater(
+        st, settings, body, raw, result, url, method, target,
+        raw_response=result.raw_response,
+        protocol="http/1.1",
+        status=resp.status if resp else None,
+        reason=resp.reason.decode("latin-1", "replace") if resp else "",
+    )
+
+
+async def _finish_repeater(
+    st, settings, body, raw, result, url, method, target,
+    *, raw_response: bytes, protocol: str, status, reason,
+):
+    """Log the exchange and shape the reply, shared by both protocols."""
+    mime = ""
+    if protocol == "h2" and result.h2_headers is not None:
+        mime = (http2.get(result.h2_headers, b"content-type") or b"").decode(
+            "latin-1", "replace")
+    elif result.response is not None:
+        mime = (result.response.header("content-type") or b"").decode(
+            "latin-1", "replace")
+
     flow_id = None
     if body.log and settings.logging_enabled:
-        resp = result.response
         cap = settings.max_stored_body
         flow_id = await st.db.insert_flow(
-            project_id=_pid(),
+            project_id=_pid(), protocol=protocol,
             source="repeater", host=body.host, port=body.port, tls=int(body.tls),
             method=method, target=target, url=url,
-            status=resp.status if resp else None,
-            reason=resp.reason.decode("latin-1", "replace") if resp else None,
-            mime=((resp.header("content-type") or b"").decode("latin-1", "replace")
-                  .split(";")[0].strip() if resp else None),
-            req_len=len(raw), resp_len=len(result.raw_response),
+            status=status, reason=reason,
+            mime=mime.split(";")[0].strip() or None,
+            req_len=len(raw), resp_len=len(raw_response),
             duration_ms=result.duration_ms, error=result.error,
             in_scope=int(in_scope(settings, url)),
             raw_request=raw,
-            raw_response=result.raw_response[:cap] if result.raw_response else None,
+            raw_response=raw_response[:cap] if raw_response else None,
         )
         st.hub.publish("flow_new", {
             "id": flow_id, "ts": time.time(), "source": "repeater",
+            "protocol": protocol,
             "host": body.host, "port": body.port, "tls": body.tls,
-            "method": method, "url": url,
-            "status": resp.status if resp else None,
-            "resp_len": len(result.raw_response),
+            "method": method, "url": url, "status": status,
+            "resp_len": len(raw_response),
             "duration_ms": result.duration_ms, "error": result.error,
         })
 
@@ -533,13 +583,13 @@ async def repeater_send(body: RepeaterRequest):
         "ok": result.ok,
         "error": result.error,
         "duration_ms": round(result.duration_ms, 1),
-        "status": result.response.status if result.response else None,
-        "reason": (result.response.reason.decode("latin-1", "replace")
-                   if result.response else None),
-        "length": len(result.raw_response),
-        "raw_response_b64": _b64(result.raw_response),
+        "status": status,
+        "reason": reason or None,
+        "length": len(raw_response),
+        "protocol": protocol,
+        "raw_response_b64": _b64(raw_response),
         "flow_id": flow_id,
-        **_decoded_body(result.raw_response or None),
+        **_decoded_body(raw_response or None),
     }
 
 

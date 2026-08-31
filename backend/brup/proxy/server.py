@@ -19,6 +19,7 @@ import ssl
 import time
 from dataclasses import dataclass, field
 
+from .. import http2
 from .. import http_message as hm
 from ..ca import CertificateAuthority
 from ..config import Settings, in_scope, should_intercept
@@ -27,8 +28,9 @@ from ..events import EventHub
 from ..projects import ProjectManager
 from ..netutil import STREAM_LIMIT, close_writer, tunnel, upgrade_to_tls
 from ..vpn import VpnManager
+from .h2_server import H2Server, H2Stream
 from .interceptor import Interceptor
-from .upstream import send_request
+from .upstream import negotiated_protocol, send_h2_request, send_request
 
 log = logging.getLogger("brup.proxy")
 
@@ -135,7 +137,7 @@ class ProxyServer:
                 tls_server = await asyncio.start_server(
                     lambda r, w: self._spawn(self._handle_tls_listener(r, w)),
                     cfg.proxy_host, cfg.invisible_tls_port,
-                    ssl=self.ca.sni_context(),
+                    ssl=self.ca.sni_context(http2=cfg.listen_http2),
                     limit=STREAM_LIMIT,
                     reuse_address=True,
                 )
@@ -209,6 +211,10 @@ class ProxyServer:
         if ssl_object is not None:
             sni = getattr(ssl_object, "brup_sni", None)
         try:
+            if negotiated_protocol(writer) == "h2":
+                host, port = (sni, 443) if sni else ("", 443)
+                await self._serve_h2(reader, writer, host, port)
+                return
             await self._serve_requests(
                 reader, writer, tls=True,
                 fixed_host=(sni, 443) if sni else None,
@@ -372,7 +378,7 @@ class ProxyServer:
         should_log = settings.logging_enabled and (scoped or settings.log_out_of_scope)
         if should_log:
             flow_id = await self.db.insert_flow(
-                project_id=project_id,
+                project_id=project_id, protocol="http/1.1",
                 source="proxy", host=host, port=port, tls=int(tls),
                 method=req.method.decode("latin-1", "replace"),
                 target=req.target.decode("latin-1", "replace"),
@@ -494,6 +500,167 @@ class ProxyServer:
             self._since_trim = 0
             await self.db.trim(project_id, self.settings.max_history)
 
+
+    # ------------------------------------------------------------- HTTP/2
+    async def _serve_h2(self, reader, writer, host: str, port: int) -> None:
+        """Run an HTTP/2 client connection, one task per request stream."""
+        server = H2Server(
+            reader, writer,
+            lambda stream: self._exchange_h2(stream, host, port),
+        )
+        await server.serve()
+
+    async def _exchange_h2(
+        self, stream: H2Stream, host: str, port: int
+    ) -> tuple[hm.Headers, bytes] | None:
+        """One HTTP/2 request/response, with the same treatment as HTTP/1.1.
+
+        Returning None drops the stream, which is how a dropped interception is
+        signalled to the connection layer.
+        """
+        settings = self.settings
+        project_id = self.project_id
+        self.stats.requests += 1
+
+        headers = list(stream.headers)
+        authority = http2.get(headers, b":authority") or b""
+        # The CONNECT target (or SNI) is authoritative; :authority only fills in
+        # the host when the listener could not know it.
+        target_host = host or hm.split_authority(authority, 443)[0]
+        path = http2.get(headers, b":path") or b"/"
+        method = (http2.get(headers, b":method") or b"GET").decode("latin-1", "replace")
+        url = hm.build_url(True, target_host, port, path)
+        scoped = in_scope(settings, url)
+
+        if settings.header_rules:
+            hm.apply_header_rules(headers, settings.header_rules, "request")
+
+        body = stream.body
+        edited = False
+        if settings.intercept_requests and should_intercept(settings, url):
+            decision, new_raw = await self.interceptor.hold(
+                kind="request", project_id=project_id, flow_id=None,
+                host=target_host, port=port, tls=True, url=url, method=method,
+                raw=http2.request_to_text(headers, body),
+            )
+            if decision == "drop":
+                self.stats.dropped += 1
+                return None
+            try:
+                parsed_headers, parsed_body = http2.request_from_text(new_raw)
+            except http2.Http2Error as exc:
+                log.info("edited HTTP/2 request is unusable: %s", exc)
+                return None
+            if (parsed_headers, parsed_body) != (headers, body):
+                edited = True
+                headers, body = parsed_headers, parsed_body
+                path = http2.get(headers, b":path") or path
+                url = hm.build_url(True, target_host, port, path)
+                scoped = in_scope(settings, url)
+
+        raw_request = http2.request_to_text(headers, body)
+        flow_id = None
+        if settings.logging_enabled and (scoped or settings.log_out_of_scope):
+            flow_id = await self.db.insert_flow(
+                project_id=project_id, protocol="h2", source="proxy",
+                host=target_host, port=port, tls=1, method=method,
+                target=path.decode("latin-1", "replace"), url=url,
+                req_len=len(raw_request), was_edited=int(edited),
+                in_scope=int(scoped), raw_request=raw_request,
+            )
+            self.hub.publish("flow_new", {
+                "id": flow_id, "ts": time.time(), "source": "proxy",
+                "protocol": "h2", "host": target_host, "port": port, "tls": True,
+                "method": method, "url": url, "req_len": len(raw_request),
+                "was_edited": int(edited), "in_scope": int(scoped),
+            })
+
+        blocked = self.vpn.killswitch_error(settings) if self.vpn else None
+        if blocked:
+            self.stats.errors += 1
+            if flow_id is not None:
+                await self.db.update_flow(flow_id, error=blocked)
+                self.hub.publish("flow_update", {"id": flow_id, "error": blocked})
+            return self._h2_error(502, blocked)
+
+        result = await send_h2_request(target_host, port, headers, body, settings)
+        if not result.ok:
+            self.stats.errors += 1
+            if flow_id is not None:
+                await self.db.update_flow(flow_id, error=result.error,
+                                          duration_ms=result.duration_ms,
+                                          protocol=result.protocol)
+                self.hub.publish("flow_update", {
+                    "id": flow_id, "error": result.error,
+                    "duration_ms": result.duration_ms,
+                })
+            return self._h2_error(
+                502, f"BRUP could not reach {target_host}:{port} - {result.error}")
+
+        resp_headers = list(result.h2_headers or [])
+        resp_body = result.h2_body
+
+        if settings.header_rules:
+            hm.apply_header_rules(resp_headers, settings.header_rules, "response")
+
+        if settings.intercept_responses and should_intercept(settings, url):
+            decision, new_raw = await self.interceptor.hold(
+                kind="response", project_id=project_id, flow_id=flow_id,
+                host=target_host, port=port, tls=True, url=url, method=method,
+                raw=http2.response_to_text(resp_headers, resp_body),
+                status=result.status,
+            )
+            if decision == "drop":
+                self.stats.dropped += 1
+                if flow_id is not None:
+                    await self.db.update_flow(flow_id, error="response dropped")
+                return None
+            try:
+                resp_headers, resp_body = http2.response_from_text(new_raw)
+            except http2.Http2Error as exc:
+                log.info("edited HTTP/2 response is unusable: %s", exc)
+                return None
+
+        self.stats.responses += 1
+        if flow_id is not None:
+            raw_response = http2.response_to_text(resp_headers, resp_body)
+            cap = settings.max_stored_body
+            mime = (http2.get(resp_headers, b"content-type") or b"")
+            await self.db.update_flow(
+                flow_id,
+                status=result.status,
+                reason="",
+                protocol=result.protocol,
+                mime=mime.decode("latin-1", "replace").split(";")[0].strip(),
+                resp_len=len(raw_response),
+                duration_ms=result.duration_ms,
+                raw_response=raw_response[:cap],
+            )
+            self.hub.publish("flow_update", {
+                "id": flow_id, "status": result.status,
+                "protocol": result.protocol,
+                "resp_len": len(raw_response), "duration_ms": result.duration_ms,
+            })
+            await self._maybe_trim(project_id)
+
+        # HTTP/2 forbids connection-specific fields, and an edited response may
+        # have reintroduced one.
+        return http2.strip_for_h2(resp_headers), resp_body
+
+    @staticmethod
+    def _h2_error(status: int, detail: str) -> tuple[hm.Headers, bytes]:
+        body = (
+            f"<!doctype html><html><head><title>BRUP {status}</title></head>"
+            f"<body style=\"font:14px system-ui;padding:2rem\">"
+            f"<h1>{status}</h1><p>{detail}</p>"
+            f"<p style=\"color:#888\">BRUP intercepting proxy</p></body></html>"
+        ).encode()
+        return [
+            (b":status", str(status).encode()),
+            (b"content-type", b"text/html; charset=utf-8"),
+            (b"content-length", str(len(body)).encode()),
+        ], body
+
     # --------------------------------------------------------------- CONNECT
     async def _handle_connect(
         self, req: hm.Request, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -512,15 +679,21 @@ class ProxyServer:
                      b"Proxy-Agent: BRUP\r\n\r\n")
         await writer.drain()
 
+        offer_h2 = self.settings.listen_http2
         try:
             await upgrade_to_tls(
-                reader, writer, self.ca.context_for(host), server_side=True
+                reader, writer,
+                self.ca.context_for(host, http2=offer_h2),
+                server_side=True,
             )
         except (ssl.SSLError, OSError, asyncio.TimeoutError) as exc:
             # Usually the client rejecting our CA - a very common first-run issue.
             log.info("TLS handshake with client failed for %s: %s", host, exc)
             return
 
+        if negotiated_protocol(writer) == "h2":
+            await self._serve_h2(reader, writer, host, port)
+            return
         await self._serve_requests(reader, writer, tls=True, fixed_host=(host, port))
 
     def _is_passthrough(self, host: str) -> bool:

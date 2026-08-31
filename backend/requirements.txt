@@ -2,4 +2,5 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pydantic==2.10.4
 cryptography==44.0.0
+h2==4.4.1
 Brotli==1.1.0

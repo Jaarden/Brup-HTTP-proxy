@@ -161,11 +161,16 @@ class CertificateAuthority:
         )
         return cert_pem, key_pem
 
-    def context_for(self, host: str) -> ssl.SSLContext:
-        """Return (and cache) a server-side SSLContext presenting ``host``."""
+    def context_for(self, host: str, *, http2: bool = False) -> ssl.SSLContext:
+        """Return (and cache) a server-side SSLContext presenting ``host``.
+
+        ``http2`` adds h2 to the ALPN offer. It is part of the cache key because
+        the negotiated protocol is a property of the context.
+        """
         host = (host or "unknown").strip().lower().rstrip(".")
+        key = f"{host}|h2" if http2 else host
         with self._lock:
-            cached = self._contexts.get(host)
+            cached = self._contexts.get(key)
             if cached is not None:
                 return cached
 
@@ -184,21 +189,23 @@ class CertificateAuthority:
             # older test targets still negotiate.
             _relax_tls_floor(ctx)
             try:
-                ctx.set_alpn_protocols(["http/1.1"])
+                # Order is the server's preference; the client still chooses.
+                ctx.set_alpn_protocols(["h2", "http/1.1"] if http2 else ["http/1.1"])
             except NotImplementedError:
                 pass
-            self._contexts[host] = ctx
+            self._contexts[key] = ctx
             return ctx
 
-    def sni_context(self, default_host: str = "brup.invalid") -> ssl.SSLContext:
+    def sni_context(self, default_host: str = "brup.invalid", *,
+                    http2: bool = False) -> ssl.SSLContext:
         """Context for the invisible-HTTPS listener, selecting a cert via SNI."""
-        base = self.context_for(default_host)
+        base = self.context_for(default_host, http2=http2)
 
         def _sni_callback(sslobj, server_name, _ctx):
             if not server_name:
                 return
             try:
-                sslobj.context = self.context_for(server_name)
+                sslobj.context = self.context_for(server_name, http2=http2)
                 # Stash the name so the connection handler can recover the
                 # intended host without relying on the Host header.
                 sslobj.brup_sni = server_name
@@ -209,7 +216,7 @@ class CertificateAuthority:
         return base
 
 
-def client_context(verify: bool = False) -> ssl.SSLContext:
+def client_context(verify: bool = False, *, http2: bool = False) -> ssl.SSLContext:
     """Outbound context. Verification is off by default, like Burp."""
     ctx = ssl.create_default_context()
     if not verify:
@@ -217,7 +224,7 @@ def client_context(verify: bool = False) -> ssl.SSLContext:
         ctx.verify_mode = ssl.CERT_NONE
     _relax_tls_floor(ctx)
     try:
-        ctx.set_alpn_protocols(["http/1.1"])
+        ctx.set_alpn_protocols(["h2", "http/1.1"] if http2 else ["http/1.1"])
     except NotImplementedError:
         pass
     return ctx

@@ -19,7 +19,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = "4"
+SCHEMA_VERSION = "5"
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS flows (
     host          TEXT    NOT NULL,
     port          INTEGER NOT NULL,
     tls           INTEGER NOT NULL DEFAULT 0,
+    protocol      TEXT    NOT NULL DEFAULT 'http/1.1',
     method        TEXT,
     target        TEXT,
     url           TEXT,
@@ -142,7 +143,7 @@ CREATE TABLE IF NOT EXISTS wordlists (
 LIKE_ESCAPE = "ESCAPE '" + chr(92) + "'"
 
 FLOW_LIST_COLUMNS = (
-    "id, project_id, ts, source, host, port, tls, method, target, url, status, "
+    "id, project_id, ts, source, host, port, tls, protocol, method, target, url, status, "
     "reason, mime, req_len, resp_len, duration_ms, was_edited, in_scope, notes, "
     "color, error"
 )
@@ -202,6 +203,7 @@ class Database:
         """Additive schema changes, applied to databases created by older builds."""
         additions = [
             ("projects", "temporary", "INTEGER NOT NULL DEFAULT 0"),
+            ("flows", "protocol", "TEXT NOT NULL DEFAULT 'http/1.1'"),
         ]
         for table, column, decl in additions:
             existing = {

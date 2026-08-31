@@ -223,6 +223,9 @@ export function History() {
                   <td>
                     {row.host}
                     {row.tls ? <span className="tag tls" style={{ marginLeft: 4 }}>TLS</span> : null}
+                    {row.protocol === 'h2'
+                      ? <span className="tag h2" style={{ marginLeft: 4 }}>h2</span>
+                      : null}
                     {row.source === 'repeater' ? <span className="tag" style={{ marginLeft: 4 }}>RPT</span> : null}
                     {row.was_edited ? <span className="tag edited" style={{ marginLeft: 4 }}>ED</span> : null}
                   </td>

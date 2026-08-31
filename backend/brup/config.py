@@ -72,6 +72,8 @@ class Settings(BaseModel):
     invisible_proxy: bool = False
     invisible_tls_enabled: bool = False
     invisible_tls_port: int = 9444
+    # Whether h2 is advertised to clients. A listener property, so system-wide.
+    listen_http2: bool = True
     # Host a request is assumed to target when an invisible-mode client sends
     # neither an absolute URI nor a Host header.
     invisible_default_host: str = ""
@@ -97,6 +99,11 @@ class Settings(BaseModel):
     # Applied to proxied traffic only, before interception, so the operator
     # sees and can edit the request that will actually be sent.
     header_rules: list[HeaderRule] = Field(default_factory=list)
+
+    # --- http/2 ----------------------------------------------------------
+    # Whether h2 is offered upstream. Turn it off to force a target onto
+    # HTTP/1.1 and compare how it behaves.
+    upstream_http2: bool = True
 
     # --- upstream --------------------------------------------------------
     upstream_proxy: str = ""          # e.g. http://corp-proxy:3128
@@ -127,6 +134,7 @@ SYSTEM_ONLY_KEYS: frozenset[str] = frozenset({
     "proxy_port",
     "invisible_tls_enabled",
     "invisible_tls_port",
+    "listen_http2",
     # There is one network namespace, so one tunnel: a project cannot have its
     # own VPN, and must not be able to switch off the kill switch.
     "vpn_required",

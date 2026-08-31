@@ -211,7 +211,7 @@ export function Repeater() {
           onSubmit={() => void send()}
           toolbar={
             <span className="dim" style={{ fontWeight: 400, textTransform: 'none' }}>
-              Ctrl+Enter to send
+              Ctrl+Enter to send · first line ends HTTP/2 to send over HTTP/2
             </span>
           }
         />
@@ -232,6 +232,7 @@ export function Repeater() {
                   <span className={`s${Math.floor((state.result?.status ?? 0) / 100)}xx`}>
                     {state.result?.status} {state.result?.reason}
                   </span>
+                  {state.result?.protocol === 'h2' && <span className="tag h2">h2</span>}
                   <span>{Math.round(state.result?.duration_ms ?? 0)} ms</span>
                 </>
               )

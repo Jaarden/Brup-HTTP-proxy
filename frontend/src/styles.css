@@ -467,3 +467,5 @@ table.grid td.mono { font-family: var(--mono); }
 .header-rule select { flex: 0 0 auto; font-size: 11.5px; padding: 3px 5px; }
 .header-rule .hr-name { flex: 0 0 210px; }
 .header-rule .hr-value { flex: 1 1 auto; min-width: 90px; }
+
+.tag.h2 { background: #2b3a52; color: #9dc0ea; }
