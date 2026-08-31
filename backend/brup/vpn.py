@@ -35,6 +35,15 @@ WG_INTERFACE = "brup0"
 # /proc/sys. The shim reports success when the value already matches (compose
 # sets it at start-up) and defers to the real sysctl otherwise.
 SHIM_DIR = "/usr/local/libexec/brup"
+
+# A full tunnel replaces the default route, which also swallows the *replies* to
+# connections that came in from outside - the web UI and the proxy port itself
+# stop answering anyone but a loopback client. These mark such replies so they
+# keep using the original route. The mark is deliberately not WireGuard's own
+# (0xca6c), so the two cannot interfere.
+BYPASS_MARK = "0x4252"
+BYPASS_TABLE = "51821"
+BYPASS_PREF = "100"
 RUN_DIR = Path("/run/brup-vpn")
 LOG_LINES = 400
 CONNECT_TIMEOUT = 45.0
@@ -204,6 +213,7 @@ class VpnManager:
         self._reader: asyncio.Task | None = None
         self._kind: Kind | None = None
         self._lock = asyncio.Lock()
+        self._bypass: tuple[str, str] | None = None   # (gateway, interface)
 
     # ------------------------------------------------------------- accessors
     @property
@@ -333,6 +343,8 @@ class VpnManager:
             self._publish()
 
             RUN_DIR.mkdir(parents=True, exist_ok=True)
+            # Read the host-facing default route while it is still the default.
+            self._bypass = await self._read_default_route()
             try:
                 if profile.kind == "wireguard":
                     await self._connect_wireguard(profile)
@@ -351,6 +363,8 @@ class VpnManager:
                 await self._teardown()
                 self._publish()
                 raise VpnError(self.message) from exc
+
+            await self._install_inbound_bypass()
 
             self.state = "connected"
             self.connected_at = time.time()
@@ -529,9 +543,84 @@ class VpnManager:
                 await self._reader
             self._reader = None
 
+    # ------------------------------------------------- inbound reply bypass
+    async def _read_default_route(self) -> tuple[str, str] | None:
+        """The gateway and interface currently carrying the default route."""
+        code, text = await self._run(["ip", "-4", "route", "show", "default"],
+                                     timeout=10)
+        if code != 0:
+            return None
+        for line in text.splitlines():
+            parts = line.split()
+            if "via" in parts and "dev" in parts:
+                gateway = parts[parts.index("via") + 1]
+                interface = parts[parts.index("dev") + 1]
+                self._emit(f"host route is via {gateway} dev {interface}")
+                return gateway, interface
+        return None
+
+    async def _install_inbound_bypass(self) -> None:
+        """Keep replies to inbound connections off the tunnel.
+
+        Without this, a full tunnel takes over the default route and the reply
+        to anyone who connected to the UI or the proxy port from another machine
+        is sent into the VPN, where it is dropped. Connections arriving on the
+        host-facing interface are marked in conntrack; their replies get the
+        mark back on the way out and are routed by the original default route.
+
+        Best effort: if the kernel lacks the conntrack match, the tunnel still
+        works and only remote management access is affected, so this logs
+        rather than failing the connection.
+        """
+        if self._bypass is None:
+            self._emit("no host default route found; skipping inbound bypass")
+            return
+        gateway, interface = self._bypass
+
+        steps = [
+            ["ip", "route", "replace", "default", "via", gateway,
+             "dev", interface, "table", BYPASS_TABLE],
+            ["ip", "rule", "add", "fwmark", BYPASS_MARK,
+             "lookup", BYPASS_TABLE, "pref", BYPASS_PREF],
+            ["iptables", "-t", "mangle", "-A", "PREROUTING", "-i", interface,
+             "-m", "conntrack", "--ctstate", "NEW",
+             "-j", "CONNMARK", "--set-mark", BYPASS_MARK],
+            # Restore only this mark, so WireGuard's own fwmark is untouched.
+            ["iptables", "-t", "mangle", "-A", "OUTPUT",
+             "-m", "connmark", "--mark", BYPASS_MARK,
+             "-j", "MARK", "--set-mark", BYPASS_MARK],
+        ]
+        for argv in steps:
+            code, _ = await self._run(argv, timeout=15)
+            if code != 0:
+                self._emit("inbound bypass could not be installed; the tunnel is "
+                           "up but reaching BRUP from another machine may fail")
+                await self._remove_inbound_bypass()
+                return
+        self._emit("inbound connections will reply via the host route")
+
+    async def _remove_inbound_bypass(self) -> None:
+        if self._bypass is None:
+            return
+        _gateway, interface = self._bypass
+        for argv in [
+            ["iptables", "-t", "mangle", "-D", "OUTPUT",
+             "-m", "connmark", "--mark", BYPASS_MARK,
+             "-j", "MARK", "--set-mark", BYPASS_MARK],
+            ["iptables", "-t", "mangle", "-D", "PREROUTING", "-i", interface,
+             "-m", "conntrack", "--ctstate", "NEW",
+             "-j", "CONNMARK", "--set-mark", BYPASS_MARK],
+            ["ip", "rule", "del", "fwmark", BYPASS_MARK,
+             "lookup", BYPASS_TABLE, "pref", BYPASS_PREF],
+            ["ip", "route", "flush", "table", BYPASS_TABLE],
+        ]:
+            with contextlib.suppress(Exception):
+                await self._run(argv, timeout=15)
+
     # --------------------------------------------------------- disconnecting
     async def _teardown(self) -> None:
         """Undo whatever a connect attempt managed to set up."""
+        await self._remove_inbound_bypass()
         if self._kind == "wireguard":
             env = {"PATH": f"{SHIM_DIR}:{os.environ.get('PATH', '/usr/sbin:/usr/bin')}"}
             with contextlib.suppress(Exception):

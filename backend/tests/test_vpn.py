@@ -411,6 +411,13 @@ async def test_connect_rewrite_keeps_the_rest_of_the_config(vpn, monkeypatch, tm
     # The test host need not have the tun device or the VPN binaries.
     monkeypatch.setattr(manager, "preflight", lambda kind: None)
 
+    async def no_route():
+        return None
+
+    # connect() reads the host default route first; that is not what this test
+    # is about, and it would otherwise hit the stubbed subprocess launcher.
+    monkeypatch.setattr(manager, "_read_default_route", no_route)
+
     captured: dict[str, list[str]] = {}
 
     async def fake_exec(*argv, **kwargs):
@@ -559,3 +566,125 @@ async def test_exit_ip_is_reported_and_cleared_with_the_tunnel(vpn):
     await manager.disconnect()
     # A stale address in the top bar would be actively misleading.
     assert manager.status()["exit_ip"] is None
+
+
+# ------------------------------------------------- inbound reply bypass
+#
+# A full tunnel replaces the default route, which also swallows replies to
+# connections that arrived from elsewhere: the UI and the proxy port stop
+# answering anyone but a loopback client, because Docker masquerades those into
+# the bridge subnet where a more specific route still applies. These cover the
+# routing logic; the end-to-end behaviour needs a real tunnel and NET_ADMIN.
+
+DEFAULT_ROUTE_OUTPUT = "default via 172.24.0.1 dev eth0 \n"
+
+
+def record_runs(manager, monkeypatch, *, route_output=DEFAULT_ROUTE_OUTPUT,
+                fail_on=None):
+    """Capture the commands the manager would run instead of running them."""
+    calls: list[list[str]] = []
+
+    async def fake_run(argv, *, env=None, timeout=30.0):
+        calls.append(list(argv))
+        if fail_on is not None and fail_on in " ".join(argv):
+            return 1, "boom"
+        if argv[:4] == ["ip", "-4", "route", "show"]:
+            return 0, route_output
+        return 0, ""
+
+    monkeypatch.setattr(manager, "_run", fake_run)
+    return calls
+
+
+async def test_reads_the_host_default_route(vpn, monkeypatch):
+    manager, _, _ = vpn
+    record_runs(manager, monkeypatch)
+    assert await manager._read_default_route() == ("172.24.0.1", "eth0")
+
+
+async def test_default_route_parsing_tolerates_extra_fields(vpn, monkeypatch):
+    manager, _, _ = vpn
+    record_runs(manager, monkeypatch,
+                route_output="default via 10.0.0.1 dev ens18 proto dhcp metric 100\n")
+    assert await manager._read_default_route() == ("10.0.0.1", "ens18")
+
+
+async def test_no_default_route_is_handled(vpn, monkeypatch):
+    manager, _, _ = vpn
+    record_runs(manager, monkeypatch, route_output="")
+    assert await manager._read_default_route() is None
+
+    # Installing the bypass without one is a no-op with an explanation, not a
+    # crash - the tunnel itself is still fine.
+    manager._bypass = None
+    calls = record_runs(manager, monkeypatch, route_output="")
+    await manager._install_inbound_bypass()
+    assert calls == []
+    assert any("skipping inbound bypass" in line for line in manager.log_tail())
+
+
+async def test_bypass_marks_inbound_connections_and_routes_them_home(vpn, monkeypatch):
+    manager, _, _ = vpn
+    manager._bypass = ("172.24.0.1", "eth0")
+    calls = record_runs(manager, monkeypatch)
+    await manager._install_inbound_bypass()
+
+    joined = [" ".join(c) for c in calls]
+    # A table holding the original default route...
+    assert "ip route replace default via 172.24.0.1 dev eth0 table 51821" in joined
+    # ...selected by a mark that is not WireGuard's own (51820 / 0xca6c)...
+    assert "ip rule add fwmark 0x4252 lookup 51821 pref 100" in joined
+    assert not any("51820" in c for c in joined)
+    # ...set on connections arriving from the host side...
+    assert any("PREROUTING -i eth0" in c and "--ctstate NEW" in c
+               and "CONNMARK --set-mark 0x4252" in c for c in joined)
+    # ...and restored on the way out, but only for that mark, so WireGuard's
+    # own fwmark on its encrypted packets is left alone.
+    assert any("-A OUTPUT" in c and "--mark 0x4252" in c
+               and "MARK --set-mark 0x4252" in c for c in joined)
+    assert any("inbound connections will reply via the host route" in line
+               for line in manager.log_tail())
+
+
+async def test_a_failed_bypass_step_cleans_up_and_keeps_the_tunnel(vpn, monkeypatch):
+    """A kernel without the conntrack match must not take the tunnel down."""
+    manager, _, _ = vpn
+    manager._bypass = ("172.24.0.1", "eth0")
+    calls = record_runs(manager, monkeypatch, fail_on="conntrack")
+    await manager._install_inbound_bypass()
+
+    joined = [" ".join(c) for c in calls]
+    # It backed out what it had already added.
+    assert any("ip rule del fwmark 0x4252" in c for c in joined)
+    assert any("ip route flush table 51821" in c for c in joined)
+    assert any("reaching BRUP from another machine may fail" in line
+               for line in manager.log_tail())
+
+
+async def test_teardown_removes_the_bypass(vpn, monkeypatch):
+    manager, _, _ = vpn
+    manager._bypass = ("172.24.0.1", "eth0")
+    manager._kind = "wireguard"
+    calls = record_runs(manager, monkeypatch)
+    monkeypatch.setattr(manager, "_stop_process", lambda: asyncio.sleep(0))
+    monkeypatch.setattr(manager, "_restore_resolv_conf", lambda: None)
+
+    await manager._teardown()
+
+    joined = [" ".join(c) for c in calls]
+    assert any("-t mangle -D OUTPUT" in c for c in joined)
+    assert any("-t mangle -D PREROUTING" in c for c in joined)
+    assert any("ip rule del fwmark 0x4252" in c for c in joined)
+    assert any("ip route flush table 51821" in c for c in joined)
+    # Removal happens before the tunnel goes down, so the rules never outlive it.
+    assert joined.index("iptables -t mangle -D OUTPUT -m connmark --mark 0x4252 "
+                        "-j MARK --set-mark 0x4252") \
+        < next(i for i, c in enumerate(joined) if "wg-quick down" in c)
+
+
+async def test_bypass_removal_is_safe_without_a_captured_route(vpn, monkeypatch):
+    manager, _, _ = vpn
+    manager._bypass = None
+    calls = record_runs(manager, monkeypatch)
+    await manager._remove_inbound_bypass()
+    assert calls == []

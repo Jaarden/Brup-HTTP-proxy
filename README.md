@@ -291,8 +291,22 @@ goes down, so it can never show a stale address.
 
 ### What to expect once connected
 
-- The **web UI stays reachable**. Docker's bridge subnet keeps a more specific
-  route than the tunnel's default route, so management traffic is unaffected.
+- **BRUP stays reachable, including from other machines.** A full tunnel takes
+  over the default route, which would otherwise swallow the *replies* to
+  connections that arrived from elsewhere — the UI and the proxy port would stop
+  answering anything but a local client. BRUP marks inbound connections in
+  conntrack and routes their replies back out over the host's original default
+  route, so remote access keeps working while everything the proxy sends still
+  goes through the tunnel.
+
+  This matters as soon as BRUP is not on the machine you browse from — a NAS
+  under Portainer, a VM, a lab box. A local client happens to work either way,
+  because Docker masquerades it into the bridge subnet where a more specific
+  route still applies; a client on your LAN does not.
+
+  It needs the `conntrack` iptables match, which the shipped image has. If the
+  kernel lacks it, BRUP logs that remote access may fail and leaves the tunnel
+  up rather than refusing to connect. **Show log** will say so.
 - **DNS follows the tunnel.** If the config specifies DNS, BRUP points
   `/etc/resolv.conf` at it so lookups do not leak, and restores the original on
   disconnect. A consequence worth knowing: if the tunnel is broken, name
@@ -303,6 +317,9 @@ goes down, so it can never show a stale address.
 ### Limitations
 
 - One tunnel at a time, system-wide.
+- Replies to inbound connections bypass the tunnel by design, so that BRUP
+  itself stays reachable. Traffic BRUP *sends* — everything the proxy, Repeater
+  and Intruder do — always goes through it.
 - Credentials and configs are stored in the `/data` volume in plain text, like
   the CA key. Anyone with access to that volume can read them.
 - IPv6 inside the tunnel is left to the VPN client; BRUP does not add its own
@@ -650,7 +667,7 @@ docker run --rm \
   -v "$PWD/backend/tests:/app/tests:ro" \
   -v "$PWD/backend/pytest.ini:/app/pytest.ini:ro" \
   brup:latest sh -c "pip install -q pytest pytest-asyncio httpx && python -m pytest -q"
-# 115 passed
+# 122 passed
 ```
 
 Layout:
