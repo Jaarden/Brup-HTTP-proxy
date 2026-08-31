@@ -56,7 +56,15 @@ export default function App() {
           </nav>
 
           <div className="topbar-right">
-            <span className="project-chip" title="Active project">
+            <span
+              className={`project-chip${activeProject?.temporary ? ' temp' : ''}`}
+              title={activeProject?.temporary
+                ? 'Temporary project — its history, sitemap, Repeater tabs and '
+                  + 'Intruder results are discarded when BRUP restarts. '
+                  + 'Press "keep" beside it in the sidebar to make it permanent.'
+                : 'Active project'}
+            >
+              {activeProject?.temporary && '⏱ '}
               {activeProject?.name ?? '…'}
             </span>
             {proxy && (

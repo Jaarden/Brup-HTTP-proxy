@@ -30,18 +30,91 @@ async def mgr(tmp_path):
 
 # ------------------------------------------------------------- lifecycle
 
-async def test_load_bootstraps_a_default_project(mgr):
+async def test_load_bootstraps_a_temporary_project(mgr):
+    """With nothing to open, BRUP starts in a temporary project like Burp does."""
     manager, db, _ = mgr
     projects = await manager.list()
     assert len(projects) == 1
+    assert projects[0]["temporary"] is True
+    assert projects[0]["name"] == "Temporary project"
     assert manager.active_id == projects[0]["id"]
     # The choice is remembered so a restart reopens the same project.
     assert await db.get_meta("active_project") == manager.active_id
 
 
+async def test_the_bootstrap_project_is_discarded_on_reopen(mgr):
+    """Its work does not survive, which is the whole point of temporary."""
+    manager, db, store = mgr
+    first = manager.active_id
+    await db.insert_flow(project_id=first, host="gone.test", port=80,
+                         url="http://gone.test/x", method="GET")
+    assert (await db.list_flows(first))["total"] == 1
+
+    path = db.path
+    db.close()
+
+    reopened = Database(path)
+    try:
+        again = ProjectManager(reopened, store, EventHub())
+        await again.load()
+        # A fresh temporary project, not the old one.
+        assert again.active_id != first
+        assert again.active["temporary"] is True
+        assert [p["id"] for p in await again.list()] == [again.active_id]
+        assert (await reopened.list_flows(first))["total"] == 0
+    finally:
+        reopened.close()
+
+
+async def test_keeping_the_bootstrap_project_makes_its_work_survive(mgr):
+    """The escape hatch: press keep and it becomes a normal project."""
+    manager, db, store = mgr
+    pid = manager.active_id
+    await db.insert_flow(project_id=pid, host="kept.test", port=80,
+                         url="http://kept.test/x", method="GET")
+
+    kept = await manager.keep(pid)
+    assert kept["temporary"] is False
+
+    path = db.path
+    db.close()
+    reopened = Database(path)
+    try:
+        again = ProjectManager(reopened, store, EventHub())
+        await again.load()
+        assert again.active_id == pid
+        assert again.active["name"] == "Temporary project"
+        assert (await reopened.list_flows(pid))["total"] == 1
+    finally:
+        reopened.close()
+
+
+async def test_a_permanent_project_survives_while_the_temporary_one_goes(mgr):
+    manager, db, store = mgr
+    temp = manager.active_id
+    real = await manager.create("Real engagement")
+    await db.insert_flow(project_id=real["id"], host="real.test", port=80,
+                         url="http://real.test/x", method="GET")
+    await manager.activate(temp)   # leave the temporary one active
+
+    path = db.path
+    db.close()
+    reopened = Database(path)
+    try:
+        again = ProjectManager(reopened, store, EventHub())
+        await again.load()
+        # The active pointer referenced a purged project, so it falls back to
+        # what is left rather than bootstrapping another temporary one.
+        assert [p["name"] for p in await again.list()] == ["Real engagement"]
+        assert again.active_id == real["id"]
+        assert (await reopened.list_flows(real["id"]))["total"] == 1
+    finally:
+        reopened.close()
+
+
 async def test_active_project_survives_a_reopen(mgr):
     manager, db, store = mgr
-    second = await manager.create("Second")
+    second = await manager.create("Second")      # permanent
     await manager.activate(second["id"])
 
     reopened = ProjectManager(db, store, EventHub())
@@ -262,7 +335,9 @@ async def test_repeater_tabs_roundtrip_and_replace(mgr):
 
 async def test_attacks_marked_running_are_reset_on_reopen(mgr):
     manager, db, _ = mgr
-    pid = manager.active_id
+    # A permanent project: a temporary one is discarded on reopen, attacks and
+    # all, so there would be nothing left to assert about.
+    pid = (await manager.create("Keeps attacks"))["id"]
     await db.upsert_attack(id="live", project_id=pid, created=1.0, host="a.test",
                            port=80, attack_type="sniper", total=10, completed=4,
                            status="running")

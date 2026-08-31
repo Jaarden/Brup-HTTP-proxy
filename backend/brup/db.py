@@ -254,12 +254,14 @@ class Database:
             "   AS attack_count "
             "FROM projects p ORDER BY p.created"
         ).fetchall()
-        out = []
-        for row in rows:
-            item = dict(row)
-            item["overrides"] = json.loads(item["overrides"] or "{}")
-            out.append(item)
-        return out
+        return [self._project_row(row) for row in rows]
+
+    @staticmethod
+    def _project_row(row) -> dict[str, Any]:
+        item = dict(row)
+        item["overrides"] = json.loads(item["overrides"] or "{}")
+        item["temporary"] = bool(item.get("temporary"))
+        return item
 
     async def list_projects(self) -> list[dict[str, Any]]:
         return await self._run(self._list_projects)
@@ -276,7 +278,7 @@ class Database:
         return {
             "id": project_id, "name": name, "created": now, "updated": now,
             "notes": "", "overrides": json.loads(overrides), "flow_count": 0,
-            "attack_count": 0, "temporary": temporary,
+            "attack_count": 0, "temporary": bool(temporary),
         }
 
     async def create_project(
@@ -294,11 +296,7 @@ class Database:
         row = self._conn.execute(
             "SELECT * FROM projects WHERE id = ?", (project_id,)
         ).fetchone()
-        if row is None:
-            return None
-        item = dict(row)
-        item["overrides"] = json.loads(item["overrides"] or "{}")
-        return item
+        return self._project_row(row) if row is not None else None
 
     async def get_project(self, project_id: str):
         return await self._run(self._get_project, project_id)

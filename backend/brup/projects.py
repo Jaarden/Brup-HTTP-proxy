@@ -22,7 +22,10 @@ from .events import EventHub
 log = logging.getLogger("brup.projects")
 
 ACTIVE_KEY = "active_project"
-DEFAULT_NAME = "Default project"
+# The project created when there is none is temporary, like Burp's: work is
+# discarded on restart unless you explicitly keep it or make your own project.
+# Named for what it is, since "Default" would not hint that it vanishes.
+BOOTSTRAP_NAME = "Temporary project"
 
 
 class ProjectError(Exception):
@@ -48,12 +51,16 @@ class ProjectManager:
 
     # ------------------------------------------------------------- lifecycle
     async def load(self) -> None:
-        """Pick up the previously active project, creating one if needed."""
+        """Pick up the previously active project, creating one if needed.
+
+        Temporary projects were already purged when the database was opened, so
+        arriving here with none means the last run had nothing permanent.
+        """
         projects = await self.db.list_projects()
         if not projects:
-            created = await self.db.create_project(DEFAULT_NAME)
+            created = await self.db.create_project(BOOTSTRAP_NAME, temporary=True)
             projects = [created]
-            log.info("created %s", DEFAULT_NAME)
+            log.info("created %s (temporary; discarded on restart)", BOOTSTRAP_NAME)
 
         wanted = await self.db.get_meta(ACTIVE_KEY)
         chosen = next((p for p in projects if p["id"] == wanted), projects[0])

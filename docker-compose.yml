@@ -5,9 +5,13 @@ services:
     container_name: brup
     restart: unless-stopped
     ports:
-      - "9080:9080"   # web UI + API
-      - "9081:9081"   # proxy listener (point your browser here)
-      - "9444:9444"   # invisible-HTTPS listener (optional)
+      # Which host interface each port is published on. BRUP_BIND covers all
+      # three; BRUP_UI_BIND overrides just the UI, so you can keep the
+      # unauthenticated interface on localhost while leaving the proxy
+      # reachable from the LAN (a phone, another VM). See .env.example.
+      - "${BRUP_UI_BIND:-${BRUP_BIND:-0.0.0.0}}:9080:9080"   # web UI + API
+      - "${BRUP_BIND:-0.0.0.0}:9081:9081"                    # proxy listener
+      - "${BRUP_BIND:-0.0.0.0}:9444:9444"                    # invisible HTTPS
     volumes:
       # Where BRUP keeps its state: the CA key and certificate, settings.json
       # and the SQLite database holding every project.

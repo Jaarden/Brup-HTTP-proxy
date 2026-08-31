@@ -69,6 +69,20 @@ Three ports are published:
 | `9081` | **Proxy listener** — point your browser here |
 | `9444` | Invisible-HTTPS listener (only used if you enable it) |
 
+All three are published on every interface by default, so the proxy is usable
+from another machine. **`BRUP_BIND`** changes that, and **`BRUP_UI_BIND`**
+overrides it for the UI alone:
+
+| Setting | Effect |
+| --- | --- |
+| unset | All three ports on `0.0.0.0` — reachable from your network. |
+| `BRUP_BIND=127.0.0.1` | Localhost only; nothing on the network can reach BRUP. |
+| `BRUP_UI_BIND=127.0.0.1` | The UI stays local while the proxy remains reachable from the LAN. |
+
+That last combination is the one to reach for when proxying a phone or another
+VM: the UI has **no authentication**, so anyone who can reach port 9080 controls
+the proxy and can read every project's history.
+
 The 90xx range is used rather than the more obvious 8080/8081 because those are
 commonly already taken by other local services. Host and container ports are kept
 identical, so the address the settings page reports is the one you connect to. To
@@ -142,13 +156,19 @@ isolated workspace holding **its own** HTTP history, sitemap, Repeater tabs and
 Intruder attacks — switching project swaps all of it at once, so two engagements
 never mix.
 
+**BRUP starts in a temporary project**, as Burp does. With nothing else to open
+it creates one called *Temporary project*, marked ⏱ in the sidebar and the top
+bar. Its work is **discarded when BRUP restarts** — so poking at something costs
+you nothing, and keeping it is a deliberate act. Press **keep** beside it, or
+create a named project with **+ New project**, and it survives from then on.
+Projects you made yourself are never temporary unless you asked for one.
+
 - **+ New project** creates one. "Copy settings" starts it from the current
   project's setting overrides, which saves redoing scope rules for a second
   target on the same engagement.
-- **⏱ Temporary project** creates a scratch workspace immediately, named for the
-  current time. It behaves like any other project but is **discarded when BRUP
-  restarts** — for a quick look at something you do not want cluttering the list.
-  Hover it and press **keep** to promote it to a permanent project.
+- **⏱ Temporary project** creates another scratch workspace, named for the
+  current time — for a quick look at something you do not want cluttering the
+  list. Press **keep** on any temporary project to promote it.
 - **Double-click** a project (or edit the name field in Project settings) to
   rename it.
 - **×** deletes it, after confirming — that permanently removes its history,
@@ -600,6 +620,8 @@ Environment variables:
 | --- | --- | --- |
 | `BRUP_DATA` | `brup-data` | Host location of the data: a named volume, or a path to bind-mount. Read by `docker compose`, not the application. |
 | `BRUP_DATA_DIR` | `/data` | Where that data is mounted inside the container, and where the application looks for it. |
+| `BRUP_BIND` | `0.0.0.0` | Host interface the ports are published on. Read by `docker compose`. |
+| `BRUP_UI_BIND` | `$BRUP_BIND` | Overrides the above for the UI and API only. |
 | `BRUP_LOG_LEVEL` | `INFO` | Python log level. `DEBUG` adds VPN client output. |
 
 Set these in `.env` (start from `.env.example`).
@@ -628,7 +650,7 @@ docker run --rm \
   -v "$PWD/backend/tests:/app/tests:ro" \
   -v "$PWD/backend/pytest.ini:/app/pytest.ini:ro" \
   brup:latest sh -c "pip install -q pytest pytest-asyncio httpx && python -m pytest -q"
-# 112 passed
+# 115 passed
 ```
 
 Layout:
@@ -674,8 +696,8 @@ Known limits:
 - **One upstream connection per request.** Simple and predictable; slower than a
   pooling proxy under heavy Intruder load.
 - **No authentication on the UI.** Anyone who can reach port 9080 controls the
-  proxy and can read every project's history. Keep it bound to localhost; do not
-  publish it to a network you do not control.
+  proxy and can read every project's history. Set `BRUP_UI_BIND=127.0.0.1` to
+  keep it on localhost; do not publish it to a network you do not control.
 - **Projects are an organisational boundary, not a security one.** They live in
   one SQLite database and anyone with UI access can switch between them.
 - **Response interception is off by default** — turning it on halts every
